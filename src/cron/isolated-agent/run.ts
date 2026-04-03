@@ -549,6 +549,10 @@ export async function runCronIsolatedAgentTurn(params: {
   let fallbackModel = liveSelection.model;
   const runStartedAt = Date.now();
   let runEndedAt = runStartedAt;
+
+  // Hoist channel stream state so it's accessible after try/catch for delivery dedup.
+  let channelStreamCallbacks: ReturnType<typeof createChannelStreamCallbacks> | null = null;
+
   try {
     const sessionFile = resolveSessionTranscriptPath(cronSession.sessionEntry.sessionId, agentId);
     const resolvedVerboseLevel =
@@ -563,7 +567,7 @@ export async function runCronIsolatedAgentTurn(params: {
 
     // --- Channel stream: real-time output to Telegram topics for hook sessions ---
     const channelStream = parseChannelStreamTarget(agentSessionKey);
-    const channelStreamCallbacks = channelStream
+    channelStreamCallbacks = channelStream
       ? createChannelStreamCallbacks({
           target: channelStream,
           sessionKey: agentSessionKey,
