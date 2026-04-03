@@ -40,6 +40,11 @@ import {
 } from "../../config/sessions.js";
 import { registerAgentRunContext } from "../../infra/agent-events.js";
 import { logWarn } from "../../logger.js";
+import { resolveSessionConversationRef } from "../../channels/plugins/session-conversation.js";
+import type { BlockReplyPayload } from "../../agents/pi-embedded-payloads.js";
+import type { ReplyPayload } from "../../auto-reply/types.js";
+import type { VerboseLevel } from "../../auto-reply/thinking.js";
+import type { OriginatingChannelType } from "../../auto-reply/templating.js";
 import { normalizeAgentId } from "../../routing/session-key.js";
 import {
   buildSafeExternalPrompt,
@@ -95,6 +100,86 @@ export type RunCronAgentTurnResult = {
 type ResolvedCronDeliveryTarget = Awaited<ReturnType<typeof resolveDeliveryTarget>>;
 
 type IsolatedDeliveryContract = "cron-owned" | "shared";
+
+// ---------------------------------------------------------------------------
+// Channel stream target — enables real-time streaming to Telegram topics
+// for hook-dispatched sessions (e.g. worker agents in forum topics).
+// ---------------------------------------------------------------------------
+
+type ChannelStreamTarget = {
+  channel: string;
+  to: string;
+  threadId: string | undefined;
+};
+
+function parseChannelStreamTarget(
+  sessionKey: string,
+): ChannelStreamTarget | null {
+  const ref = resolveSessionConversationRef(sessionKey);
+  if (!ref || !ref.channel || !ref.id) {
+    return null;
+  }
+  return {
+    channel: ref.channel,
+    to: ref.threadId ? ref.baseConversationId ?? ref.id : ref.id,
+    threadId: ref.threadId,
+  };
+}
+
+function createChannelStreamCallbacks(params: {
+  target: ChannelStreamTarget;
+  sessionKey: string;
+  accountId?: string;
+  cfg: OpenClawConfig;
+  verboseLevel: VerboseLevel | undefined;
+  abortSignal?: AbortSignal;
+}): {
+  onBlockReply: (payload: BlockReplyPayload) => Promise<void>;
+  onToolResult: (payload: ReplyPayload) => Promise<void>;
+  shouldEmitToolResult: () => boolean;
+  shouldEmitToolOutput: () => boolean;
+  streamedCount: { value: number };
+} {
+  const streamedCount = { value: 0 };
+  const verbose = params.verboseLevel === "on" || params.verboseLevel === "full";
+  const verboseFull = params.verboseLevel === "full";
+
+  const send = async (payload: ReplyPayload) => {
+    if (params.abortSignal?.aborted) {return;}
+    try {
+      const { routeReply } = await import(
+        "../../auto-reply/reply/route-reply.runtime.js"
+      );
+      await routeReply({
+        payload,
+        channel: params.target.channel as OriginatingChannelType,
+        to: params.target.to,
+        sessionKey: params.sessionKey,
+        accountId: params.accountId,
+        threadId: params.target.threadId,
+        cfg: params.cfg,
+        abortSignal: params.abortSignal,
+      });
+      streamedCount.value++;
+    } catch (err) {
+      logWarn(`cron-stream: routeReply failed: ${String(err)}`);
+    }
+  };
+
+  return {
+    onBlockReply: async (payload: BlockReplyPayload) => {
+      if (!payload.text?.trim() && !payload.mediaUrls?.length) {return;}
+      await send({ text: payload.text, mediaUrls: payload.mediaUrls });
+    },
+    onToolResult: async (payload: ReplyPayload) => {
+      if (!verbose) {return;}
+      await send(payload);
+    },
+    shouldEmitToolResult: () => verbose,
+    shouldEmitToolOutput: () => verboseFull,
+    streamedCount,
+  };
+}
 
 function resolveCronToolPolicy(params: {
   deliveryRequested: boolean;
@@ -252,7 +337,11 @@ export async function runCronIsolatedAgentTurn(params: {
     agentId,
     nowMs: now,
     // Isolated cron runs must not carry prior turn context across executions.
-    forceNew: params.job.sessionTarget === "isolated",
+    // Exception: channel-bound sessions (e.g. Telegram topics) persist so
+    // users can reply in topics and the agent has full prior context.
+    forceNew:
+      params.job.sessionTarget === "isolated" &&
+      !parseChannelStreamTarget(agentSessionKey),
   });
   const runSessionId = cronSession.sessionEntry.sessionId;
   const runSessionKey = baseSessionKey.startsWith("cron:")
@@ -471,6 +560,20 @@ export async function runCronIsolatedAgentTurn(params: {
       verboseLevel: resolvedVerboseLevel,
     });
     const messageChannel = resolvedDelivery.channel;
+
+    // --- Channel stream: real-time output to Telegram topics for hook sessions ---
+    const channelStream = parseChannelStreamTarget(agentSessionKey);
+    const channelStreamCallbacks = channelStream
+      ? createChannelStreamCallbacks({
+          target: channelStream,
+          sessionKey: agentSessionKey,
+          accountId: resolvedDelivery.accountId,
+          cfg: cfgWithAgentDefaults,
+          verboseLevel: resolvedVerboseLevel,
+          abortSignal,
+        })
+      : null;
+    const effectiveMessageChannel = messageChannel ?? (channelStream?.channel as OriginatingChannelType | undefined);
     // Per-job payload.fallbacks takes priority over agent-level fallbacks.
     const payloadFallbacks =
       params.job.payload.kind === "agentTurn" && Array.isArray(params.job.payload.fallbacks)
@@ -537,8 +640,16 @@ export async function runCronIsolatedAgentTurn(params: {
             // Cron jobs are trusted local automation, so isolated runs should
             // inherit owner-only tooling like local `openclaw agent` runs.
             senderIsOwner: true,
-            messageChannel,
+            messageChannel: effectiveMessageChannel,
             agentAccountId: resolvedDelivery.accountId,
+            ...(channelStreamCallbacks
+              ? {
+                  onBlockReply: channelStreamCallbacks.onBlockReply,
+                  onToolResult: channelStreamCallbacks.onToolResult,
+                  shouldEmitToolResult: channelStreamCallbacks.shouldEmitToolResult,
+                  shouldEmitToolOutput: channelStreamCallbacks.shouldEmitToolOutput,
+                }
+              : {}),
             sessionFile,
             agentDir,
             workspaceDir,
@@ -801,6 +912,13 @@ export async function runCronIsolatedAgentTurn(params: {
       deliveryAttempted: params?.deliveryAttempted,
       ...telemetry,
     });
+
+  // If channel streaming already delivered the output, mark as delivered.
+  const channelStreamDelivered =
+    channelStreamCallbacks != null && channelStreamCallbacks.streamedCount.value > 0;
+  if (channelStreamDelivered) {
+    return resolveRunOutcome({ delivered: true, deliveryAttempted: true });
+  }
 
   // Skip delivery for heartbeat-only responses (HEARTBEAT_OK with no real content).
   const ackMaxChars = resolveHeartbeatAckMaxChars(agentCfg);
