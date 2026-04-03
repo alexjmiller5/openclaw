@@ -87,6 +87,8 @@ export type AgentConfig = {
     model?: AgentModelConfig;
     /** Require explicit agentId in sessions_spawn (no default same-as-caller). */
     requireAgentId?: boolean;
+    /** Override verbose level for cron/hook sessions (overrides global verboseDefault). */
+    verboseDefault?: "off" | "on" | "full";
   };
   /** Optional per-agent sandbox overrides. */
   sandbox?: AgentSandboxConfig;

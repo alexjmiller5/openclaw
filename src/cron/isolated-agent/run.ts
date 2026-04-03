@@ -141,11 +141,8 @@ function createChannelStreamCallbacks(params: {
   streamedCount: { value: number };
 } {
   const streamedCount = { value: 0 };
-  // Always suppress tool summaries for channel-streamed sessions (hook workers).
-  // The global verboseDefault is "on" for the main session — workers should
-  // never inherit that. This avoids needing a separate per-scope config key.
-  const verbose = false;
-  const verboseFull = false;
+  const verbose = params.verboseLevel === "on" || params.verboseLevel === "full";
+  const verboseFull = params.verboseLevel === "full";
 
   const send = async (payload: ReplyPayload) => {
     if (params.abortSignal?.aborted) {return;}
@@ -560,6 +557,7 @@ export async function runCronIsolatedAgentTurn(params: {
     const sessionFile = resolveSessionTranscriptPath(cronSession.sessionEntry.sessionId, agentId);
     const resolvedVerboseLevel =
       normalizeVerboseLevel(cronSession.sessionEntry.verboseLevel) ??
+      normalizeVerboseLevel(agentCfg?.subagents?.verboseDefault) ??
       normalizeVerboseLevel(agentCfg?.verboseDefault) ??
       "off";
     registerAgentRunContext(cronSession.sessionEntry.sessionId, {

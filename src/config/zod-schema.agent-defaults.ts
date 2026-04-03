@@ -206,6 +206,7 @@ export const AgentDefaultsSchema = z
         runTimeoutSeconds: z.number().int().min(0).optional(),
         announceTimeoutMs: z.number().int().positive().optional(),
         requireAgentId: z.boolean().optional(),
+        verboseDefault: z.enum(["off", "on", "full"]).optional(),
       })
       .strict()
       .optional(),
