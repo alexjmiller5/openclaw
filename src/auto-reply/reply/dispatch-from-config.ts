@@ -585,8 +585,14 @@ export async function dispatchReplyFromConfig(params: {
 
     // Forum topics are threaded conversations within a group — verbose tool
     // summaries should be delivered into the topic thread, same as DMs.
+    // Also respect explicit verbose level: when "on" or "full", always send
+    // tool summaries regardless of chat type.
+    const effectiveVerboseLevel =
+      sessionStoreEntry.entry?.verboseLevel ?? cfg.agents?.defaults?.verboseDefault;
     const shouldSendToolSummaries =
-      (ctx.ChatType !== "group" || ctx.IsForum === true) && ctx.CommandSource !== "native";
+      ((ctx.ChatType !== "group" || ctx.IsForum === true) && ctx.CommandSource !== "native") ||
+      effectiveVerboseLevel === "on" ||
+      effectiveVerboseLevel === "full";
     const acpDispatch = await dispatchAcpRuntime.tryDispatchAcpReply({
       ctx,
       cfg,

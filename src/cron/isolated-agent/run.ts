@@ -141,8 +141,11 @@ function createChannelStreamCallbacks(params: {
   streamedCount: { value: number };
 } {
   const streamedCount = { value: 0 };
-  const verbose = params.verboseLevel === "on" || params.verboseLevel === "full";
-  const verboseFull = params.verboseLevel === "full";
+  // Always suppress tool summaries for channel-streamed sessions (hook workers).
+  // The global verboseDefault is "on" for the main session — workers should
+  // never inherit that. This avoids needing a separate per-scope config key.
+  const verbose = false;
+  const verboseFull = false;
 
   const send = async (payload: ReplyPayload) => {
     if (params.abortSignal?.aborted) {return;}
